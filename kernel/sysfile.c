@@ -15,6 +15,22 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
+#include "sysinfo.h"
+
+// Collect information about running system
+// Syscall Lab
+int
+sysinfo(uint64 addr)
+{
+  struct sysinfo si;    
+  struct proc *p = myproc();
+
+  si.freemem = ksize();
+  si.nproc = proccount();
+  if (copyout(p->pagetable, addr, (char *)&si, sizeof(si)) < 0)
+    return -1;
+  return 0;
+}
 
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
@@ -502,4 +518,14 @@ sys_pipe(void)
     return -1;
   }
   return 0;
+}
+
+uint64
+sys_sysinfo(void)
+{
+  uint64 si; // user pointer to struct sysinfo
+  argaddr(0, &si);
+  if (si < 0)
+    return -1;
+  return sysinfo(si);
 }
