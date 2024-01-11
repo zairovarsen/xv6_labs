@@ -188,7 +188,6 @@ UPROGS=\
 	$U/_grind\
 	$U/_wc\
 	$U/_zombie\
-<<<<<<< HEAD
 	$U/_trace\
 	$U/_sysinfotest\
 
