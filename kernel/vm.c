@@ -449,3 +449,72 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return -1;
   }
 }
+
+void 
+indent(int depth)
+{
+  printf("..");
+
+  for (int i = 0; i < depth; i++){
+    printf(" ");
+    printf("..");
+  }
+}
+
+void 
+vmprinthelper(pagetable_t pagetable, int depth, int maxDepth)
+{
+  for (int i = 0; i < 512; i++){
+     pte_t pte = pagetable[i];
+     if(pte & PTE_V){
+        uint64 child = PTE2PA(pte);
+        indent(depth);
+        printf("%d: pte %p pa %p\n",i, pte, child);
+        if (depth < maxDepth){
+          depth++;
+          vmprinthelper((pagetable_t) child, depth, maxDepth);
+          depth--;
+        }
+     }
+  }
+}
+
+/* Print a page table */ 
+ void vmprint(pagetable_t pagetable)
+{
+  printf("page table %p\n", pagetable);
+  vmprinthelper(pagetable,0,2);
+}
+
+//  uvastarat - starting virtual address of the first user page to check
+//  n - number of pages to check
+// ubuffer - address of user buffer to store result into bitmask 
+// one bit per page (First page = least significant bit);
+int 
+check_page_access(pagetable_t pagetable, uint64 uvastart, int n, uint64 ubuf)
+{
+  uint32 kbuf = 0;
+  
+  if (uvastart >= MAXVA || n > 64)
+    return -1;
+
+  for (int i = 0; i < n; i++){
+    pte_t *pte = walk(pagetable, uvastart, 0);
+    uvastart += PGSIZE;
+
+    if(pte == 0)
+      continue;
+    if((*pte & PTE_V) == 0)
+      continue;
+    if((*pte & PTE_U) == 0)
+      continue;
+    if(*pte & PTE_A){
+      kbuf |= (1 << i);
+      *pte &= ~PTE_A;
+    }
+  }
+  
+  if (copyout(pagetable, ubuf, (char *) &kbuf, (n+7)/8) < 0)
+    return -1;
+  return 0;
+}

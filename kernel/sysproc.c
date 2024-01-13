@@ -74,7 +74,16 @@ sys_sleep(void)
 int
 sys_pgaccess(void)
 {
-  // lab pgtbl: your code here.
+  uint64 uvastart; 
+  int n; 
+  uint64 ubuf;
+                  
+  argaddr(0, &uvastart);
+  argint(1, &n);
+  argaddr(2, &ubuf);
+ 
+  if (check_page_access(myproc()->pagetable, uvastart, n, ubuf) < 0)
+    return -1;
   return 0;
 }
 #endif
