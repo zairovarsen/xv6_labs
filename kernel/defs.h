@@ -147,6 +147,8 @@ void            trapinit(void);
 void            trapinithart(void);
 extern struct spinlock tickslock;
 void            usertrapret(void);
+void            ualarmfrsave(void);
+void            ualarmfrrestore(void);
 
 // uart.c
 void            uartinit(void);
@@ -184,6 +186,9 @@ void            plic_complete(int);
 void            virtio_disk_init(void);
 void            virtio_disk_rw(struct buf *, int);
 void            virtio_disk_intr(void);
+
+// backtrace.c
+void            backtrace();
 
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))

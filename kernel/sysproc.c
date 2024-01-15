@@ -57,6 +57,7 @@ sys_sleep(void)
   argint(0, &n);
   if(n < 0)
     n = 0;
+  backtrace();
   acquire(&tickslock);
   ticks0 = ticks;
   while(ticks - ticks0 < n){
@@ -90,4 +91,31 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+// After every n ticks application consumes you should call the fn function
+uint64 
+sys_sigalarm(void)
+{
+  int ticks;
+  uint64 handler;
+  struct proc *p = myproc();
+
+  argint(0, &ticks);
+  argaddr(1, &handler);
+
+  p->alarmhandler = handler;
+  p->alarminterval = ticks;
+
+  return 0;
+}
+
+uint64
+sys_sigreturn(void)
+{
+  struct proc *p = myproc();
+  ualarmfrrestore();
+  p->alarmhandleractive = 0;
+  p->cputimeused = 0; 
+  return p->alarmframe->a0;
 }
