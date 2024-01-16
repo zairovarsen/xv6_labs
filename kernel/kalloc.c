@@ -13,12 +13,12 @@ void freerange(void *pa_start, void *pa_end);
 
 extern char end[]; // first address after kernel.
                    // defined by kernel.ld.
-
 struct run {
   struct run *next;
 };
 
 struct {
+  int rc[PHYSTOP >> PGSHIFT];
   struct spinlock lock;
   struct run *freelist;
 } kmem;
@@ -27,7 +27,41 @@ void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
+
+  for (int i =0; i < (PGROUNDUP(PHYSTOP)-KERNBASE) / PGSIZE; i++)
+    kmem.rc[i] = 1;
   freerange(end, (void*)PHYSTOP);
+}
+
+int
+kgetRcIndex(void *pa)
+{
+  if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
+    panic("kgetRcIndex");
+
+  uint64 pa0 = ((uint64) pa - KERNBASE);
+  return pa0 >> PGSHIFT; 
+}
+
+int 
+kgetrc(void *pa)
+{
+  int index = kgetRcIndex(pa);
+  return kmem.rc[index]; 
+}
+
+void 
+kincrc(void *pa)
+{
+  int index = kgetRcIndex(pa);
+  kmem.rc[index] += 1;
+}
+
+void 
+kdecrc(void *pa)
+{
+  int index = kgetRcIndex(pa);
+  kmem.rc[index] -= 1;
 }
 
 void
@@ -51,9 +85,15 @@ kfree(void *pa)
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
 
+  if (kgetrc(pa) <= 0)
+    panic("kfree_decr\n");
+
+  kdecrc(pa);
+  if (kgetrc(pa) > 0)
+    return;
+  
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
-
   r = (struct run*)pa;
 
   acquire(&kmem.lock);
@@ -72,8 +112,11 @@ kalloc(void)
 
   acquire(&kmem.lock);
   r = kmem.freelist;
-  if(r)
+  if(r){
+    int index = kgetRcIndex(r);
+    kmem.rc[index] = 1;
     kmem.freelist = r->next;
+  }
   release(&kmem.lock);
 
   if(r)

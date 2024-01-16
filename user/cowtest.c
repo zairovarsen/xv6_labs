@@ -150,6 +150,7 @@ filetest()
       sleep(1);
       int j = *(int*)buf;
       if(j != i){
+        printf("j:%d,i:%d\n", j,i);
         printf("error: read the wrong value\n");
         exit(1);
       }
