@@ -67,15 +67,17 @@ e1000_init(uint32 *xregs)
   regs[E1000_RDLEN] = sizeof(rx_ring);
 
   // filter by qemu's MAC address, 52:54:00:12:34:56
+  // packet arriving at the ethernet controller are checked against these addreses. If packet source or dest MAC matches RA packet is accepted for further processing. 
   regs[E1000_RA] = 0x12005452;
   regs[E1000_RA+1] = 0x5634 | (1<<31);
   // multicast table
+  // network packets addressed to specific group of destinations
   for (int i = 0; i < 4096/32; i++)
     regs[E1000_MTA + i] = 0;
 
   // transmitter control bits.
   regs[E1000_TCTL] = E1000_TCTL_EN |  // enable
-    E1000_TCTL_PSP |                  // pad short packets
+    E1000_TCTL_PSP |                  // pad short packets make packets 64 bytes long
     (0x10 << E1000_TCTL_CT_SHIFT) |   // collision stuff
     (0x40 << E1000_TCTL_COLD_SHIFT);
   regs[E1000_TIPG] = 10 | (8<<10) | (6<<20); // inter-pkt gap
@@ -102,7 +104,25 @@ e1000_transmit(struct mbuf *m)
   // the TX descriptor ring so that the e1000 sends it. Stash
   // a pointer so that it can be freed after sending.
   //
-  
+
+  acquire(&e1000_lock);
+  int index = regs[E1000_TDT]; 
+  struct tx_desc * tail = &tx_ring[index];
+  struct mbuf * prev = tx_mbufs[index];
+
+  if ((tail->status & E1000_TXD_STAT_DD) == 0)
+    return -1; 
+
+  if (prev)
+    mbuffree(tx_mbufs[index]);
+
+  tail->addr = (uint64) m->head;
+  tail->length = m->len;
+  tail->cmd |= (E1000_TXD_CMD_RS | E1000_TXD_CMD_EOP); // indicate packet has been sent 
+  tx_mbufs[index] = m;
+
+  regs[E1000_TDT] = (index + 1) % TX_RING_SIZE;
+  release(&e1000_lock);
   return 0;
 }
 
@@ -115,6 +135,29 @@ e1000_recv(void)
   // Check for packets that have arrived from the e1000
   // Create and deliver an mbuf for each packet (using net_rx()).
   //
+
+  int index = (regs[(E1000_RDT)] + 1) % RX_RING_SIZE;
+  struct rx_desc * head = &rx_ring[index];
+
+  while (head->status & E1000_RXD_STAT_DD){
+
+    struct mbuf * buf = rx_mbufs[index];
+    buf->len = head->length;
+    net_rx(buf); // deliver mbuf to the network stack.
+
+    struct mbuf * newbuf = mbufalloc(0);
+    if (newbuf == 0)
+      return;
+    head->addr = (uint64) newbuf->head;
+    head->length = newbuf->len;
+    head->status = 0; // clear descriptor status bits
+    rx_mbufs[index] = newbuf;
+
+    index = (index + 1) % RX_RING_SIZE;
+    head = &rx_ring[index];
+  }
+
+  regs[E1000_RDT] = index == 0 ? (RX_RING_SIZE - 1) : (index - 1);
 }
 
 void

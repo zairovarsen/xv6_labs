@@ -1,0 +1,153 @@
+A transmit descriptor is a data structure used by the network controllers DMA engine to manage data transmission.
+
+Contents of Descriptor.
+  
+  Data Buffer Address: Memory address of the data buffer in the host memory. This is where the actual data to be transmitted is stored.
+  Length of Data: size of data in the buffer
+  Control Information: various flags and control fields that instruct DMA engine on how to handle the data. Might include whether the 
+  data segment is the start or end of the packet, error checking information, and more. 
+
+  The DMA reads that descriptor to find out where the data is located in the host memory and how much data needs to be transmitted.
+  Then transfers that from host memory to the transmit FIFO buffer on the Ethernet controller. 
+  After data transfer the descriptor is updated with the status of transmission (like success or failure) and written back to host memory.
+
+  Ethernet Addressing - Two 32 bit registers make up the address: one is called "high", and the other is called "low". For example the
+  Receive Address Register is comprised of Receive Address High and Receive Address Low. 
+
+
+  Receive and Transmit Description.
+
+  Packet Reception: 1. Recognize presence of packet on a wire, performing address filtering, storing the packet in the receive data FIFO, transferring the data to a receive buffer in host memory, and updating state of descriptor. 
+
+  1. Packet Address Filtering Modes:
+  - Exact Unicast/Multicast: The controller compares the destination address of each incoming packet against a list of 16 stored addresses, 
+  if destination address of packet exactly matches on of stored address packet is accepted. List can include multicast (intented for multiple recipients and unicast specific to one recipient. 
+  - Promiscuous Unicst: The controller accepts all incoming unicast packets, regardless of the destination address.
+  - Multicast with Bit Vector filtering: Controller uses a bit vector to decide whether to accept multicast packets. Certain bits of the packets  destination address are used to index into this bit vector. If the corresponding bit vector set to 1 packet is accepted. Controller offers four options of which bits of the address are used for this indexing.
+  - Promiscuous multicast - accepts all incoming packets.
+  - VLAN filtering- packets belonging to specific VLAN are accepted based on VLAN filter settings. This mode is useful for networks that segment traffic using VLANs. 
+
+  2. Incoming packets are stored in memory buffers. These buffers are areas of memory allocated specifcially for holding the data of this packets. Each memory buffer is associate with a descriptor. A descriptor is a data structure that contains information about the memory buffer, including its address and size. Ethernet controller uses these descriptors to know where to store incoming packet data in memory. 
+
+  There are 7 different sizes of buffer . Configured in Receive Control Registers (RCTL.BSIZE & RCTL.BSEX). 
+
+  In Summary Ethernet controller uses memory buffers pointed to by descritpors to store received packet data. 
+
+  Receive Descriptor Format:
+
+  When packet is received the Ethernet Controller stores the packet data in pre-designated buffer in system memory which is pointed by receive descriptor. Besides storing packet data , it also stores packet length, checksum , status, errors and other status fields. If packet spans multiple receive buffers software must read multiple descriptors to determine the packets complete length. 
+
+  A receive descriptor is a data structure in memory that contains information about the receive data buffer. Include buffer address and field for storing packet information. 
+
+  Receive Structure is something like { double address , double controlandstatusfields}. Where length is bit position[0:15] in control and status , p[acket checksum [16:31], status is [32:39] , errors [40:47], special [48:63]. 
+
+  Receive Descriptor status field indicates whether the descriptor has been used and whether reference buffer is the last one for the packet.
+
+  Structure of the Receive Descriptor Ring
+  Circular Ring of Descriptors:
+
+  The receive descriptor ring is essentially a circular buffer consisting of multiple receive descriptors.
+  Each descriptor in the ring corresponds to a receive buffer in system memory where incoming packet data can be stored.
+  Head and Tail Pointers:
+
+  Head Pointer: Indicates the position in the ring where the hardware (Ethernet controller) will write data for the next incoming packet.
+  Tail Pointer: Managed by software, it points to the position in the ring where the next new descriptor can be added.
+  These pointers "wrap around" to the beginning of the ring once they reach the end, hence forming a circular structure.
+
+  Adding Descriptors:
+
+  Software adds new receive descriptors to the ring by updating the tail pointer to point beyond the last valid descriptor.
+  Storing Packets:
+
+  As packets arrive, they are stored in the memory buffers pointed to by the descriptors at the head of the ring.
+  The hardware increments the head pointer as packets are stored, moving it to the next descriptor in the ring.
+  Ring Status:
+
+  When the head pointer is equal to the tail pointer, it indicates that the ring is empty, and there are no more buffers available to store incoming packets.
+  The hardware stops storing packets in system memory until the software advances the tail pointer, thereby making more buffers available.
+  Descriptor Processing:
+
+  Descriptors that have stored incoming packets but haven't yet been processed by software are indicated in the ring.
+  Software can determine if a receive buffer is valid by reading the descriptors in memory. This approach is more efficient than performing I/O reads to check each descriptor.
+
+Typically, in network interfaces, an interrupt is generated every time a packet is received and stored in the host memory. This interrupt signals the CPU to process the newly received packet.
+
+  Status Byte in Descriptor:
+
+  Each descriptor has a status byte. If this byte is non-zero, it indicates that the hardware has processed the descriptor and that the corresponding buffer is ready for software to handle (e.g., to read the packet data).
+
+Packet timer starts when a packet is received and transferred to host memory. It is reset and restarted each time a new packet have been received. If timer expieres a receive timer interrupt is generated. 
+Setting RDTR value to zero disables the Packet Timer. Receive timer interrupt is generated every time a packet is stored in memory.  RDTR also defines the timeout. Setting RDTR to zero disable the packet timer in this mode recieve timer interrupt is generated every time a new packet is stored in memory, leading to more frequent interrupts. Writing to RDTR with the high bit of FPD set forces a write back of consumed descriptors and immediate triggers the receive timer intterupt.
+
+RDTR allows you to set a delay period after a packet is received and before an interrupt is generated. Changing how oftern interrupts are generated, each time a packet is received the packet timer is reset to the value defined in RDTR. RDTR zero means interrupt generated for every packet received and stored in host memory (scenarios where immediate processing of packet is essential.) 
+
+Receive Interrupt Absolute Delay Timer (RADV) is another mechanism for managing interrupts. RADV guarantees an interval after a predefined interval following the receipt of the first packet, regardless of subsequent packet arrivals. 
+- Absolute timer starts when a packet is received and transferred to host memory (after the last byte of the packet data is written to memory).
+Upon successful packet reception it counts down to expiration without reset like in RDTR case. If no receive interrupt has been generated within this time define in RADV , the interrupt is generated when the absolute timer expires. To disable the Packet Timer while keepign absolute timer active RDTR should be set to value one more than RADV. 
+
+Small receive packet detect - interrupt is triggered when small packet is received and transfferred to host memory. Its enabled by setting the RSRPD which specifies the size threshold of what constistutes the small packet. 
+
+ICR.RXDMT - intrrupt generated to prevent descriptor under run. The minimum threshold is set in RCTL.RDMTS.
+ICR.RXO - FIFO overrun is when hardware tries to write to already full FIFO.
+RDTR - This timer generates an interrupt after a predetermined time since the first packet reception.
+
+PACKET TRANSMISSION. 
+
+An application sends a block of data to be transmitted over the network. The data first goes to protocol stack which calculates the needed data to transmite this data block.Calculation is based on Maximum Transmission Unit size of the network media and the space required for packet headers. For each packet protocol prepares neccesasry headers Ethernet, IP, TCP/UDP.  Then protocol stack interfaces with the software device instructing to send individual packets. 
+
+The driver receives packet with headers and interfaces with the network hardware. Network hardwares reads the packet from host memory through the DMA. 
+
+Once hardware completes transfer of the frame, it typically generates an interrupt. The driver then returns ownership of packet to Netowkr OS.
+
+Output packet consist of pointer-length pairs that form a descriptor chain. Descriptor based transmission process. Software forms transmite packets by assembling a list of pointer length pairs. It stores the information in the transmit descriptor. Software updates the on chip transmit tail pointer to point to the descriptor, signaling the hardware that packet is ready for tranmission.
+
+Transmit Descriptors are essential structures for managing how data is trasmitted over the network. There are 3 types of transmit descriptor formats provided by the Ethernet controller.
+
+Legacy Descriptor Format. Primarily points to a block of data that is to be transmitted. The descritpro format contains information about the location and size of the packet data in memory.
+
+Extended Descriptors. 
+TCP/IP Data Descriptor. This descriptor type offers access to the new offloading capabilities, such as TCP segmentation offloading or checksum offloading. Upgraded version of legacy descriptor.
+
+Control Descriptor - The control information in this descriptor is loaded into the register of a controller and affects processing of future packets. It's used for operations that require specific configuration or control commands to be sent to the hardware. 
+
+DEXT Bit. The extended descriptor types are accessed by setting the TDESC.DEXT bit to 1b. When this bit is set Ethernet controller know to treat the  descriptor as extended type. TDESC.DTYP field is examined to determine the specific type of extended descriptor and how to interpret the remaining bits in the descriptor. 
+The internal registers and memories can be access as direct mapped offsets from the BASE Address register BAR0 or BAR0/BAR1.  
+
+Offset 0x04 - Command and Status register controls the device response to certain PCI commands and reports its status. 
+Base Address Register (BAR) - Points to the base adddress of memory mapped I/O space for ethernet used to access most of internal registers. 
+Interrupt Registers (0x3c) - defines the interrupt line and pin used by the device. 
+MAC - Stores the lower and higher parts of Ethernet controllers mac address. 
+RxCTL - Controls the behaviour of the receive unit. options for packet filtering , buffer size and more. 
+TxCTL - Manages operations of the tranmit unit. Packet prioritization, transmission threshold.
+
+IOADDR Register (Offset: 0x00000000)
+Purpose: To specify an internal register, memory, or flash location within the Ethernet controller.
+Address Range:
+0x00000 to 0x1FFFF: Range for internal registers and memories.
+0x20000 to 0x7FFFF: Undefined range.
+0x80000 to 0xFFFFF: Range for flash memory.
+Access: Read/Write.
+Size: 4 bytes.
+Usage: When accessing an internal component (like a register or memory location), the address of that component is first written to the IOADDR register.
+IODATA Register (Offset: 0x00000004)
+Purpose: To read from or write to the internal resource specified by the IOADDR register.
+Functionality:
+Acts as a data field for reads or writes.
+The current value in IOADDR determines which internal resource is being accessed.
+Access: All 32 bits of this register are readable and writable.
+Size: 4 bytes.
+Usage: After setting the IOADDR register with the desired address, the IODATA register is used to perform the actual data read or write operation.
+
+Example Usage
+Reading a Register: To read a specific internal register:
+
+Write the register's address into IOADDR.
+Read the register's data from IODATA.
+Writing to a Register: To write to a specific internal register:
+
+Write the register's address into IOADDR.
+Write the data to be stored into IODATA.
+
+Device control register (CTRL). 
+Device status register. (STATUS 00008H; R) , provides software status indication about the Ethernet controllers settings and modes of operation.
+

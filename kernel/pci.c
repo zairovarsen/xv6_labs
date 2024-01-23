@@ -27,6 +27,9 @@ pci_init()
     int bus = 0;
     int func = 0;
     int offset = 0;
+    // Bus number identifies the bus on which device is located. 
+    // Dev - is a specific device on that bus
+    // Function number - some pcie devices can support multiple functions; this identifies the specific functions within a device
     uint32 off = (bus << 16) | (dev << 11) | (func << 8) | (offset);
     volatile uint32 *base = ecam + off;
     uint32 id = base[0];
