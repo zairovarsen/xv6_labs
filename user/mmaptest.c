@@ -279,6 +279,8 @@ fork_test(void)
   if(*(p1+PGSIZE) != 'A')
     err("fork mismatch (1)");
 
+  // 2 pages where 1.5 are A and other 0
+
   if((pid = fork()) < 0)
     err("fork");
   if (pid == 0) {

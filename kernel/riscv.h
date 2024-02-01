@@ -330,8 +330,9 @@ sfence_vma()
 typedef uint64 pte_t;
 typedef uint64 *pagetable_t; // 512 PTEs
 
-#endif // __ASSEMBLER__
 
+#endif // __ASSEMBLER__
+                           
 #define PGSIZE 4096 // bytes per page
 #define PGSHIFT 12  // bits of offset within a page
 

@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "fcntl.h"
+#include "file.h"
 
 struct cpu cpus[NCPU];
 
@@ -12,14 +16,22 @@ struct proc proc[NPROC];
 
 struct proc *initproc;
 
+struct {
+  struct file *file;
+  int refcount;
+  uint64 vatopa[(MAXFILE*BSIZE)/PGSIZE];
+} vmaglobals[NFILE];
+struct spinlock vmaglobal_lock;
+
 int nextpid = 1;
 struct spinlock pid_lock;
 
 extern void forkret(void);
 static void freeproc(struct proc *p);
+static int mmap_vmaglobalfilei(struct file *file);
 
 extern char trampoline[]; // trampoline.S
-
+                          
 // helps ensure that wakeups of wait()ing
 // parents are not lost. helps obey the
 // memory model when using p->parent.
@@ -308,6 +320,22 @@ fork(void)
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
 
+  for (int i = 0; i < VMASIZE; i++){
+    if (p->vma[i].len){
+      np->vma[i] = p->vma[i];
+
+      if (p->vma[i].file)
+        np->vma[i].file = filedup(p->vma[i].file);
+
+      if (p->vma[i].flags == MAP_SHARED){
+        int index = mmap_vmaglobalfilei(p->vma[i].file);
+        if (index == -1)
+          panic("FORK: can't find shared file\n");
+        vmaglobals[index].refcount += 1;
+      }
+    }
+  }
+
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
@@ -358,6 +386,13 @@ exit(int status)
       fileclose(f);
       p->ofile[fd] = 0;
     }
+  }
+
+  // unmap the process mapped region
+  for (int i = 0; i < VMASIZE; i++){
+     if (p->vma[i].len){
+      procvmremove(p->vma[i].addr, p->vma[i].len);
+     }
   }
 
   begin_op();
@@ -685,4 +720,324 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+static int 
+findvmai(struct proc *p, uint64 va)
+{
+   uint64 page_start, vmastart, vmaend;
+
+   page_start = PGROUNDDOWN(va);
+
+   for (int i = 0; i < VMASIZE; i++){
+       if (p->vma[i].len == 0)
+         continue;
+       vmastart = (uint64) p->vma[i].addr; 
+       vmaend = (uint64) p->vma[i].addr + p->vma[i].len;
+
+       if (page_start >= vmastart && page_start < vmaend)
+         return i;
+   }
+   return -1;
+}
+
+static int
+mmap_vmaglobalfreei()
+{
+  acquire(&vmaglobal_lock); 
+  for (int i =0; i < NFILE; i++){
+    if (!vmaglobals[i].file){
+      release(&vmaglobal_lock);
+      return i;
+    }
+  }
+  release(&vmaglobal_lock);
+  return -1;
+};
+
+static int
+mmap_vmaglobalfilei(struct file *f)
+{
+  acquire(&vmaglobal_lock); 
+  for (int i =0; i < NFILE; i++){
+    if (vmaglobals[i].file == f){
+      release(&vmaglobal_lock);
+      return i;
+    }
+  }
+  release(&vmaglobal_lock);
+  return -1;
+};
+
+static uint64
+mmap_vmaglobalfilepageindex(struct vma *vma, uint64 va)
+{
+  uint64 va_offset_with_mapping = va - (uint64)vma->addr;
+  int file_position = vma->offset + va_offset_with_mapping;
+  int index = file_position / PGSIZE;
+  return index;
+};
+
+static int
+mmap_read(struct file *file, uint64 pa, int offset)
+{
+  if (file) {
+    begin_op();
+    ilock(file->ip);
+    int n = readi(file->ip, 0, (uint64)pa, offset, PGSIZE);
+    if (n < 0){ 
+      iunlock(file->ip);
+      end_op();
+      return -1;
+    }
+    if (n < PGSIZE){
+      memset((char*)(pa + n),0,PGSIZE-n);
+    }
+    iunlock(file->ip);
+    end_op();
+    return 0;
+  }
+  return -1;
+}
+
+static int
+mmap_copy_shared_page(struct proc *p, int vmaindex, uint64 va)
+{
+  int vmaglobali = mmap_vmaglobalfilei(p->vma[vmaindex].file);
+  if (vmaglobali == -1)
+    return -1;
+  int pageindex = mmap_vmaglobalfilepageindex(&p->vma[vmaindex], va);
+  int pa = vmaglobals[vmaglobali].vatopa[pageindex];
+  if (!pa)
+    return -1;
+  int flags = ((p->vma[vmaindex].prot & PROT_READ) ? PTE_R : 0) | ((p->vma[vmaindex].prot & PROT_WRITE) ? PTE_W : 0);
+  if (mappages(p->pagetable, va, PGSIZE, (uint64)pa, PTE_U|flags)) {
+    return -1;
+  }
+  printf("SHARED: physical %p va %p\n", pa, va);
+  return 0;
+}
+
+static int
+mmap_copy_private_page(struct proc *p, uint64 va)
+{
+  char *mem;
+  acquire(&wait_lock);
+  struct proc *parent = p->parent;
+  pte_t *pte = walk(parent->pagetable, va, 0);
+  if (!pte){
+    release(&wait_lock);
+    return -1;
+  }
+  uint64 pa = PTE2PA(*pte);
+  if (!pa){
+    release(&wait_lock);
+    return -1;
+  }
+  mem = kalloc();
+  if (mem == 0){
+    release(&wait_lock);
+    return -1;
+  }
+  memmove(mem, (char*) pa, PGSIZE);
+  if (mappages(p->pagetable, va, PGSIZE, (uint64)mem, PTE_FLAGS(*pte)) != 0){
+    release(&wait_lock);
+    kfree(mem);
+    return -1;
+  }
+  release(&wait_lock);
+  printf("PAGE FAULT: copying private page from parent\n");
+  return 0;
+}
+
+// Return 0 if handled 
+int
+vmapagefaulthandler(uint64 va)
+{
+  struct proc *p = myproc();
+  struct vma vma;
+  uint64 faulting_va, page_start;
+  char *pa;
+  
+  faulting_va = PGROUNDDOWN(va);
+  int vmaindex = findvmai(p, faulting_va);
+  if (vmaindex == -1)
+    return -1;
+  page_start = (uint64)p->vma[vmaindex].addr;
+  vma = p->vma[vmaindex];
+
+  printf("PAGE FAULT: start %p pid %d addr %p  len %d  vmaindex %d prot %d offset %d flags %d\n", vma.addr, p->pid, page_start ,PGSIZE, vmaindex, vma.prot, vma.offset, vma.flags);
+
+  if (vma.flags == MAP_SHARED && (mmap_copy_shared_page(p, vmaindex, faulting_va) != -1)){
+    return 0;
+  }
+  if (vma.flags == MAP_PRIVATE && (mmap_copy_private_page(p, faulting_va) != -1)){
+    return 0;
+  }
+
+  pa = kalloc();
+  if (!pa)
+    panic("PAGE FAULT: kalloc");
+  memset(pa, 0, PGSIZE);
+
+  int offset = vma.offset + (faulting_va - page_start);
+  if (mmap_read(vma.file,(uint64) pa,offset) == -1){
+      uvmunmap(p->pagetable, page_start, 1, 1);
+      return -1;
+  }
+
+  int flags = ((vma.prot & PROT_READ) ? PTE_R : 0) | ((vma.prot & PROT_WRITE) ? PTE_W : 0);
+  if (mappages(p->pagetable, faulting_va, PGSIZE, (uint64)pa, PTE_U|flags) != 0){
+    kfree(pa);
+    return -1;
+  }
+
+  if (vma.flags == MAP_SHARED){
+    int index = mmap_vmaglobalfilei(p->vma[vmaindex].file);
+    if (index == -1)
+      panic("PAGE FAULT: shared file not found\n");
+    int pageindex = mmap_vmaglobalfilepageindex(&p->vma[vmaindex], faulting_va);
+    vmaglobals[index].vatopa[pageindex] = (uint64)pa;
+    printf("PAGE FAULT: MAP SHARED UPDATED pa %p for va %p PTE_R %d PTE_W %d\n", pa, faulting_va, flags & PTE_R, flags & PTE_W);
+  }
+
+  return 0;
+}
+
+// Remove mapped region
+int 
+procvmremove(void *addr, int len)
+{
+  struct proc *p = myproc(); 
+  struct vma vma;
+  uint64 page_start, vmastart;
+  int vmalen;
+
+  page_start = PGROUNDDOWN((uint64)addr);
+  int vmaindex = findvmai(p, (uint64) addr);
+  if (vmaindex == -1)
+    return -1;
+  vma = p->vma[vmaindex]; 
+  vmastart = (uint64)vma.addr; 
+  vmalen = vma.len;
+  printf("START UNMAP: [%p,%d] addr %p pid %d len %d vmaindex %d prot %d offset %d flags %d\n", vmastart, vmalen, addr, p->pid, len, vmaindex, vma.prot, vma.offset, vma.flags); 
+
+  if (vma.file) {
+    struct inode * ip = vma.file->ip; 
+    begin_op();
+    ilock(ip);
+    for (int i=0; i<len; i+=PGSIZE){
+      uint64 page_addr = page_start + i;
+      pte_t *pte = walk(p->pagetable, page_start + i, 0); 
+      uint64 pa = PTE2PA(*pte);
+      if (pte && (*pte & PTE_V)){
+        if (vma.flags & MAP_SHARED){
+          printf("Writing at pa %p and offset %p PTE_W %d PTE_R %d\n", pa, vma.offset + i, *pte & PTE_W,*pte & PTE_R);
+          writei(ip, 0, pa, vma.offset + i, PGSIZE);
+        }
+        uvmunmap(p->pagetable, page_addr, 1, 0);
+      }
+    }
+    iunlock(ip);
+    end_op();
+  }
+
+  if (vmastart == page_start){
+    if (len >= vmalen) {
+      int fileindex = mmap_vmaglobalfilei(vma.file);
+      vmaglobals[fileindex].refcount -= 1;
+      if (vmaglobals[fileindex].refcount <= 0){
+        memset(&vmaglobals[fileindex], 0, sizeof(vmaglobals[0]));
+      }
+      fileclose(vma.file);
+      memset(&p->vma[vmaindex], 0, sizeof(struct vma));
+    } else {
+      p->vma[vmaindex].addr = (void*)(page_start + len); 
+      p->vma[vmaindex].len -= len;
+    }
+  } else if (page_start + len == vmastart + vmalen) {
+    p->vma[vmaindex].len = page_start - vmastart;
+  } else {
+    // Splitting VMA 
+    int newvma = -1;
+    for (int i = 0 ; i < VMASIZE; i++){
+      if (p->vma[i].len == 0){
+        newvma = i;
+        break;
+      }
+    }
+    if (newvma == -1)
+      return -1; // No free VMA slot
+
+    p->vma[newvma] = (struct vma)  {(void *)(page_start + len),vmalen-(page_start + len - vmastart),vma.prot,vma.flags,(struct file *)filedup(vma.file),vma.offset + (page_start + len - vmastart)};
+    p->vma[vmaindex].len = page_start - vmastart;
+  }
+
+  printf("DONE UNMAP: addr %p len %d\n", p->vma[vmaindex].addr, p->vma[vmaindex].len);
+  return 0;
+}
+
+// Add mapped region
+void*
+procvmaadd(int len, int prot, int flags, int fd, int offset)
+{
+  struct proc *p = myproc();
+  uint64 start,top = MAXVA - (2 * PGSIZE); // account for trampoline and trapframe
+  int count = PGSIZE;
+
+  struct file * file = p->ofile[fd];
+
+  if ((file->readable == 0) && (prot & PROT_READ))
+    return (void *) -1;
+  if ((file->writable == 0) && (prot & PROT_WRITE) && ((flags & MAP_PRIVATE) == 0))
+    return (void *) -1;
+  if ((len % PGSIZE) != 0 || fd < 0 || fd >= NOFILE || p->ofile[fd] == 0)
+    return (void*) -1;
+
+  while (top > p->sz){
+     start = top - count; // Calculate start based on accumulated count
+
+     int found = 1;
+     for (int i = 0; i < VMASIZE; i++){
+       if (p->vma[i].len == 0){
+         continue;
+       }
+       uint64 vmastart = (uint64) p->vma[i].addr;
+       uint64 vmaend = vmastart + p->vma[i].len;
+       if (start < vmaend && top > vmastart){
+         found = 0;
+         count = 0;
+         top = vmastart;
+         break;
+       }
+     }
+
+     if (found && count >= len){
+         int j = 0;
+         while (p->vma[j].len != 0 && j < VMASIZE)
+           j++;
+         if (j == VMASIZE)
+           return (void *) -1;
+         printf("MMAP: addr %p pid %d len %d vmaindex %d prot %d offset %d flags %d\n", start, p->pid, len, j, prot, offset, flags);
+         p->vma[j] = (struct vma)  {(void *)start,len,prot,flags,(struct file *)filedup(p->ofile[fd]),offset};
+         int index = mmap_vmaglobalfilei(file);
+         if (index == -1){
+           index = mmap_vmaglobalfreei(); 
+           if (index == -1){
+             panic("MMAP: shared vma full\n");
+           }
+           vmaglobals[index].refcount = 1;
+           vmaglobals[index].file = file;
+         }
+         else {
+           vmaglobals[index].refcount += 1;
+         }
+
+         return (void *) start;
+     }
+
+     count += PGSIZE;
+  }
+  
+  return (void*) -1;
 }

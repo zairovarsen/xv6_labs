@@ -91,3 +91,29 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+uint64 
+sys_mmap(void)
+{
+  int len, prot, flags, fd, offset;
+
+  argint(1, &len);
+  argint(2, &prot);
+  argint(3, &flags);
+  argint(4, &fd);
+  argint(5, &offset);
+  
+  return (uint64) procvmaadd(len, prot, flags, fd, offset);
+}
+
+uint64 
+sys_munmap(void)
+{
+  uint64 addr;
+  int len;
+
+  argaddr(0, &addr);
+  argint(1, &len);
+
+  return procvmremove((void*)addr, len);
+}

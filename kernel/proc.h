@@ -81,9 +81,21 @@ struct trapframe {
 
 enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+struct vma {
+  void *addr; // assume address will always be zero, kernel should decide address at which to map
+              // mmap call will return that address or 0xff.... if it fails.
+  int len; // number of bytes to map
+  int prot; // assume prot is PROT_READ or PROT_WRITE or both 
+  int flags; // assume flags either shared or private not both
+  struct file *file;
+  int offset;
+};
+
 // Per-process state
 struct proc {
   struct spinlock lock;
+
+  struct vma vma[VMASIZE];     // vma area for mmap lab
 
   // p->lock must be held when using these:
   enum procstate state;        // Process state
